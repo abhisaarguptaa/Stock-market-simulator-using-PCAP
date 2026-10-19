@@ -57,6 +57,12 @@ times (`t_decide`, `t_h2d`, `t_kernel`, `t_d2h`, `t_match`, `t_publish`, `t_comm
 lists all options, including `--set NAME=VALUE` for strategy parameters, `--prices` and `--trades`
 for CSV output.
 
+## Live demo
+
+`bash scripts/demo.sh build` runs a short demo on any machine: the unit tests, identical trade logs
+across serial, OpenMP, MPI (and CUDA when the build and machine have it), and the serial matching core.
+For the GPU, open `notebooks/colab_demo.ipynb` in Colab on a T4 runtime and run all cells.
+
 ## Reproducing the study
 
 | Objective | Command | Output |
