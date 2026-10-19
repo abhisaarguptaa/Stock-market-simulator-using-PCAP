@@ -9,6 +9,7 @@ GPU's INT32 throughput. Defaults are for a Tesla T4: 2560 INT32 lanes x
 Pass your GPU's numbers if you profile on something else.
 """
 import argparse
+import io
 import os
 
 import numpy as np
@@ -21,7 +22,12 @@ import matplotlib.pyplot as plt  # noqa: E402
 
 
 def read_ncu(path):
-    df = pd.read_csv(path)
+    # ncu also prints the program's own output and "==PROF==" lines before the
+    # CSV, so start reading at the header row.
+    with open(path) as f:
+        lines = f.readlines()
+    start = next(i for i, l in enumerate(lines) if l.startswith('"ID"'))
+    df = pd.read_csv(io.StringIO("".join(lines[start:])))
     # Nsight Compute --page raw: row 0 holds units; keep only numeric data rows.
     df = df[pd.to_numeric(df["gpu__time_duration.sum"].astype(str).str.replace(",", ""),
                           errors="coerce").notna()].copy()
