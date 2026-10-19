@@ -29,7 +29,7 @@ mkdir -p "$OUT"
 
 # run <csv> <label> <lobsim args...>: REPS repetitions, header written once.
 run() {
-  local csv="$OUT/$1.csv" label=$2; shift 2
+  local csv="$OUT/$1.csv" label=$2 r; shift 2
   for ((r = 0; r < REPS; r++)); do
     if [ -s "$csv" ]; then "$@" --label "$label" >> "$csv"
     else "$@" --label "$label" --header >> "$csv"; fi
@@ -40,19 +40,33 @@ run() {
 threads_list() { local t=1; while [ $t -le "$MAX_THREADS" ]; do echo $t; t=$((t * 2)); done
                  [ $((MAX_THREADS & (MAX_THREADS - 1))) -ne 0 ] && echo "$MAX_THREADS"; true; }
 
+# Strong and weak scaling compare runs against each other, so they are
+# interleaved: each round runs every configuration once. If the machine slows
+# down partway (power saving, heat, background work), every thread count is
+# affected equally instead of whichever happened to run at that moment.
 strong() {
-  echo "== strong scaling (OpenMP)"
-  for t in $(threads_list); do
-    run strong omp "$BIN" --agents 400000 --instruments 64 --ticks "$TICKS" --decide omp --match omp --threads "$t"
+  echo "== strong scaling (OpenMP, interleaved rounds)"
+  local reps=$REPS round t; REPS=1
+  for ((round = 0; round < reps; round++)); do
+    echo " round $((round + 1))/$reps"
+    run strong serial "$BIN" --agents 400000 --instruments 64 --ticks "$TICKS"
+    for t in $(threads_list); do
+      run strong omp "$BIN" --agents 400000 --instruments 64 --ticks "$TICKS" --decide omp --match omp --threads "$t"
+    done
   done
-  run strong serial "$BIN" --agents 400000 --instruments 64 --ticks "$TICKS"
+  REPS=$reps
 }
 
 weak() {
-  echo "== weak scaling (OpenMP, 50k agents and 8 instruments per thread)"
-  for t in $(threads_list); do
-    run weak omp "$BIN" --agents $((50000 * t)) --instruments $((8 * t)) --ticks "$TICKS" --decide omp --match omp --threads "$t"
+  echo "== weak scaling (OpenMP, 50k agents and 8 instruments per thread, interleaved rounds)"
+  local reps=$REPS round t; REPS=1
+  for ((round = 0; round < reps; round++)); do
+    echo " round $((round + 1))/$reps"
+    for t in $(threads_list); do
+      run weak omp "$BIN" --agents $((50000 * t)) --instruments $((8 * t)) --ticks "$TICKS" --decide omp --match omp --threads "$t"
+    done
   done
+  REPS=$reps
 }
 
 instruments() {
