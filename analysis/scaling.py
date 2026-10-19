@@ -158,10 +158,13 @@ def crossover():
     cu = df[df["decide"] == "cuda"].sort_values("agents")
     if len(cu):
         x = [str(int(a)) for a in cu["agents"]]
+        cu = cu.assign(t_scatter=(cu["t_decide"] - cu["t_h2d"] - cu["t_kernel"] - cu["t_d2h"]).clip(lower=0))
         bottom = np.zeros(len(cu))
-        for ph in ["t_h2d", "t_kernel", "t_d2h", "t_match", "t_publish"]:
+        names = {"t_h2d": "copy to GPU", "t_kernel": "kernel", "t_d2h": "copy back",
+                 "t_scatter": "host scatter", "t_match": "matching", "t_publish": "publish"}
+        for ph, lab in names.items():
             v = (cu[ph] / cu["t_total"]).to_numpy(float)
-            ax[1].bar(x, v, bottom=bottom, label=ph[2:])
+            ax[1].bar(x, v, bottom=bottom, label=lab)
             bottom += v
         ax[1].set_ylabel("share of tick time")
         ax[1].set_xlabel("agents")
@@ -180,6 +183,9 @@ def crossover():
         summary.append(f"- CUDA overtakes OpenMP from **{int(wins.index.min())} agents**" if len(wins)
                        else "- CUDA did not overtake OpenMP in the tested range")
         boundary = ((cu["t_h2d"] + cu["t_d2h"]) / cu["t_total"]).to_numpy()
+        scatter = (cu["t_decide"] - cu["t_h2d"] - cu["t_kernel"] - cu["t_d2h"]) / cu["t_total"]
+        summary.append("- Host-side scatter of GPU results, share of tick time: " +
+                       ", ".join(f"{int(a)}: {b:.1%}" for a, b in zip(cu["agents"], scatter)))
         summary.append("- CPU-GPU copy share of tick time: " +
                        ", ".join(f"{int(a)}: {b:.1%}" for a, b in zip(cu["agents"], boundary)))
     summary.append("")
