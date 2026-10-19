@@ -1,0 +1,5 @@
+build*/
+results/
+*.nsys-rep
+*.ncu-rep
+__pycache__/
