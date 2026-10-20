@@ -1,0 +1,84 @@
+% Sections 13-16: Comparison with Existing Methods, Conclusion, Future Scope. Shared by both templates.
+
+\section{Comparison with Existing Methods}\label{sec:compare}
+Table~\ref{tab:compare} positions this work against the closest existing systems. Direct speed
+comparisons are not meaningful, because the systems simulate different models on different
+hardware; we compare what each one parallelises, how it handles reproducibility, and what it
+measures.
+
+\begin{widetable}
+\centering
+\caption{This work compared with existing methods.}
+\label{tab:compare}
+\footnotesize
+\begin{tabularx}{\textwidth}{@{}p{2.4cm} X X X X@{}}
+\toprule
+System & What runs in parallel & Matching & Reproducibility & Scaling analysis\\
+\midrule
+ABIDES / ABIDES-Gym~\cite{byrd2020abides,amrouni2021} & nothing (serial event loop) & serial, one exchange & seed only & none\\
+JAX-LOB~\cite{frey2023} & independent books on GPU & serial within book, on GPU & not discussed & per-message timing\\
+PyMarketSim~\cite{mascioli2024} & nothing & serial, one asset & not discussed & single-thread throughput\\
+FLAME GPU 2~\cite{richmond2023} & agents on GPU (spatial models) & not applicable (bidding sub-models) & atomics non-deterministic & agent-count scaling\\
+Repast4Py~\cite{collier2022} & spatial partitions over MPI & not applicable & seed; cross-rank equality not addressed & strong scaling\\
+SIMCoV-GPU~\cite{leyba2024} & spatial domains over GPUs & not applicable & statistical only ($\approx$1\%) & strong and weak scaling\\
+\midrule
+\textbf{This work} & agents on GPU or CPU cores; instruments over threads and MPI ranks & serial within instrument, parallel across instruments & \textbf{bit-identical trade log} on all back ends & strong, weak, Amdahl fit, Karp--Flatt, roofline, crossover\\
+\bottomrule
+\end{tabularx}
+\end{widetable}
+
+\textbf{Same conclusion, measured.} JAX-LOB states that matching inside one book is
+serial~\cite{frey2023}. Our results quantify the consequence end to end: matching is 92--96\% of a
+CUDA tick, so an 85$\times$ faster kernel yields only 1.1--1.6$\times$ for the whole simulation.
+
+\textbf{Different decomposition.} Spatial ABM frameworks~\cite{richmond2023,collier2022,leyba2024}
+partition by space and exchange halos. We partition by instrument, which removes all cross-rank
+conflicts; the only per-tick communication is one integer reduction. The cost moves to load
+imbalance at the barrier (20--39\% of tick time with 2--4 ranks), the analogue of Repast4Py's
+communication-bound regime.
+
+\textbf{Stronger reproducibility.} SIMCoV-GPU matches CPU and GPU results only
+statistically~\cite{leyba2024}, and OpenRAND makes only the random numbers
+reproducible~\cite{khan2024}. Counter-based random numbers, integer-only decisions, a deterministic
+arrival order and order-independent compaction together give a bit-identical trade log across 12
+configurations, so a parallel bug shows up as a changed fingerprint.
+
+\textbf{Measured threshold.} Like SIMCoV-GPU, we find the GPU pays off only above a problem size;
+we locate it at 4{,}000--16{,}000 agents against the 2-thread CPU and explain both the lower bound
+(fixed copy and launch cost) and why the advantage shrinks again (growing matching time).
+
+\textbf{Limits of this comparison.} Our CPU baseline on the T4 has only 2 threads; a stronger CPU
+would move the crossover up. Our agents are simpler than ABIDES agents (no inventory or latency
+model), and the model fails the no-autocorrelation stylised fact.
+
+\section{Conclusion}\label{sec:concl}
+We built a heterogeneous agent-based limit order book simulator with agent decisions in CUDA,
+matching parallelised across instruments with OpenMP, and instruments distributed with MPI. All
+eight objectives of the synopsis were met. Every back end produces a bit-identical trade log for a
+given seed, which made correctness checkable throughout. The measurements give one consistent
+answer: order matching under price--time priority is the scaling bottleneck. The GPU makes agent
+decisions about 85$\times$ faster, yet the whole tick improves by at most 1.41$\times$ over the
+CPU baseline, because matching takes 92--96\% of the time; the measured 1.11$\times$ at 1M agents
+sits close to the Amdahl bound of 1.16$\times$. Matching parallelises only across instruments
+(0.90$\times$ with one, 3.97$\times$ with 128). The GPU overtakes the multicore CPU between 4{,}000
+and 16{,}000 agents, below which copy and launch costs dominate. On the laptop, CPU scaling levels
+off near 2$\times$ (effective serial fraction 0.49) because of shared power and memory limits, and
+MPI overhead is dominated by load imbalance at the per-tick barrier. The simulated returns show
+heavy tails and volatility clustering, with excess short-term mean reversion as a known limitation.
+
+\section{Future Scope}\label{sec:future}
+\begin{itemize}
+\item \textbf{Faster matching.} Match independent price levels speculatively, or batch orders in
+  periodic call auctions, which allow parallel matching within an instrument at the cost of
+  changing market rules.
+\item \textbf{Moving the host scatter to the GPU.} Keep agent state and intents on the device and
+  send per-instrument order lists directly, removing the 3.2\,ms host scatter.
+\item \textbf{Load balancing for MPI.} Assign instruments to ranks by measured activity instead of
+  contiguous blocks, to cut barrier waiting; and run on a real multi-node cluster to measure network
+  cost.
+\item \textbf{More realistic agents.} Add inventory, cash and latency, and tune the agent mix to
+  remove the negative lag-1 autocorrelation.
+\item \textbf{Stronger hardware study.} Repeat the crossover on a server CPU with many cores and on
+  newer GPUs, and confirm the hardware-saturation explanation with performance counters.
+\item \textbf{Multi-GPU.} Give each MPI rank its own GPU for very large agent populations.
+\end{itemize}

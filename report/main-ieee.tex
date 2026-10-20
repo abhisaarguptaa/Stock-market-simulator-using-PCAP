@@ -1,0 +1,61 @@
+% IEEE conference template version of the report.
+% Build: see README.md in this folder (pdflatex, bibtex, pdflatex, pdflatex).
+\documentclass[conference,a4paper]{IEEEtran}
+\input{preamble}
+\usepackage{cite}
+\usepackage[hidelinks]{hyperref}
+% Wide floats span both columns in the IEEE layout.
+\newenvironment{widefigure}{\begin{figure*}[t]}{\end{figure*}}
+\newenvironment{widetable}{\begin{table*}[t]}{\end{table*}}
+
+\newlength{\covergap}\setlength{\covergap}{1cm}
+\newcommand{\coverlogo}{7.5cm}
+
+\begin{document}
+\input{content/cover}
+
+\title{Heterogeneous Parallelization of an Agent-Based\\Limit Order Book Simulator Using CUDA, OpenMP, and MPI}
+
+\author{
+\IEEEauthorblockN{Abhisaar Gupta}
+\IEEEauthorblockA{Reg.\ No.\ 240962059\\
+School of Computer Engineering\\
+Manipal Institute of Technology\\
+Manipal, India}
+\and
+\IEEEauthorblockN{Devesh Khaitan}
+\IEEEauthorblockA{Reg.\ No.\ 240962031\\
+School of Computer Engineering\\
+Manipal Institute of Technology\\
+Manipal, India}
+\and
+\IEEEauthorblockN{Sohan Kar}
+\IEEEauthorblockA{Reg.\ No.\ 240962358\\
+School of Computer Engineering\\
+Manipal Institute of Technology\\
+Manipal, India}
+\and
+\IEEEauthorblockN{Pratham Dobhal}
+\IEEEauthorblockA{Reg.\ No.\ 240962422\\
+School of Computer Engineering\\
+Manipal Institute of Technology\\
+Manipal, India}
+}
+
+\maketitle
+
+\begin{abstract}
+\input{content/abstract}
+\end{abstract}
+
+\begin{IEEEkeywords}
+\input{content/keywords}
+\end{IEEEkeywords}
+
+\input{content/body1}
+\input{content/body2}
+\input{content/body3}
+
+\bibliographystyle{IEEEtran}
+\bibliography{refs}
+\end{document}

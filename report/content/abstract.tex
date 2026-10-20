@@ -1,0 +1,16 @@
+Agent-based simulators of limit order book (LOB) markets reproduce how prices form from the orders
+of many independent traders, but mainstream simulators run as single-threaded event loops and scale
+poorly with the number of agents and instruments. The workload is not uniformly parallel: agents
+decide independently, which suits a GPU, while price--time priority forces the orders of one
+instrument to be matched one at a time. We implement a deterministic simulator with a three-tier
+heterogeneous mapping (agent decisions in CUDA, matching parallelised across instruments with
+OpenMP, and instruments distributed across MPI ranks) and measure where its performance limits lie.
+Every back end produces a bit-identical trade log for a given seed, verified on 12 configurations
+covering 1.29 million trades. On a Tesla T4 the decision kernel is about 85$\times$ faster than
+two CPU threads, yet whole-tick speedup is bounded at 1.11--1.41$\times$ because matching takes
+92--96\% of each tick. CUDA overtakes the multicore baseline at 4{,}000--16{,}000 agents. On a
+16-thread laptop, matching speeds up only across instruments (0.90$\times$ with one instrument,
+3.97$\times$ with 128); strong scaling peaks at 1.99$\times$ on 8 threads with an effective serial
+fraction of 0.49. The simulated returns show heavy tails and volatility clustering. The results
+show that order matching under price--time priority, and not the agent computation, is the scaling
+bottleneck on every back end.

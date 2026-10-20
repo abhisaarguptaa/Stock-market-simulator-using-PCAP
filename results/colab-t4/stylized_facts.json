@@ -1,0 +1,13 @@
+{
+  "instruments": 16,
+  "returns": 31664,
+  "horizon_ticks": 10,
+  "excess_kurtosis": 4.26386225005858,
+  "hill_tail_index": 8.048239485115117,
+  "acf_returns_lag1": -0.32774690427086317,
+  "acf_abs_returns_lag1": 0.20439224105884823,
+  "acf_abs_returns_lag10": 0.08943154339077197,
+  "heavy_tails": true,
+  "no_linear_autocorrelation": false,
+  "volatility_clustering": true
+}
