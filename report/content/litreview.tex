@@ -1,0 +1,128 @@
+% Section 2: Literature Review. Shared by both templates.
+\section{Literature Review}\label{sec:lit}
+
+\subsection{Foundations}
+Gode and Sunder showed that agents with no intelligence beyond a budget constraint already produce
+near-efficient allocations in a double auction, so much of market behaviour comes from the trading
+mechanism itself~\cite{gode1993}. Chiarella and Iori added fundamentalist, chartist and noise
+traders interacting through an explicit order book~\cite{chiarella2002}; Preis et al.\ showed that a
+simple multi-agent order book with price--time priority reproduces fat tails once order placement
+depth depends on the trend~\cite{preis2006}; and Farmer et al.\ found that zero-intelligence order
+flow explains much of the observed spread and price impact~\cite{farmer2005}. Cont's stylised facts
+(heavy tails, volatility clustering and no linear autocorrelation) are the standard checklist for
+validating such models~\cite{cont2001}. On the computing side, Lysenko and D'Souza built the first
+largely GPU-resident ABM framework~\cite{lysenko2008}, Fujimoto surveyed parallel discrete-event
+simulation~\cite{fujimoto1990}, and Amdahl~\cite{amdahl1967}, Gustafson~\cite{gustafson1988},
+Karp and Flatt~\cite{karp1990} and Williams et al.~\cite{williams2009} give the performance models
+used in this report.
+
+\subsection{Recent agent-based market simulators}
+\textbf{ABIDES-Gym}~\cite{amrouni2021} (ACM ICAIF 2021) wraps ABIDES~\cite{byrd2020abides}, a
+message-driven discrete-event simulator with a NASDAQ-like exchange and price--time priority, as an
+OpenAI Gym environment for reinforcement learning. It offers high fidelity and realistic latency,
+but its kernel is a single-threaded event loop and the paper reports no run times; a later study
+cites ABIDES at about 29{,}000 messages per second~\cite{mascioli2024}.
+
+\textbf{JAX-LOB}~\cite{frey2023} (ACM ICAIF 2023) is the first GPU-accelerated LOB simulator. Each
+book is a fixed-capacity array, and matching runs inside a JAX loop. The authors note that
+processing messages within one book is inherently serial, so all parallelism comes from running
+thousands of independent books with \texttt{vmap}: with 1000 books, a message costs about
+2.6\,$\mu$s per book on an RTX 2080 Ti, and RL training is about 7$\times$ faster. Its limits are
+pre-allocated capacity, a cost set by the slowest branch, and replayed order flow that does not
+react to the agent. It does not measure the end-to-end serial fraction or combine GPU agents with
+CPU matching.
+
+\textbf{PyMarketSim}~\cite{mascioli2024} (ACM ICAIF 2024) is a Python discrete-time simulator whose
+tick (observe, act, clear, advance) matches ours. Its order book takes 1.9--4.7\,$\mu$s per
+operation from $10^3$ to $10^6$ orders, about 300{,}000 book operations or 15{,}000 agent actions
+per second, but it is serial, simulates one asset and uses 25 agents in its experiments.
+
+\subsection{GPU and high-performance ABM frameworks}
+\textbf{FLAME GPU 2}~\cite{richmond2023} (Software: Practice and Experience 2023) compiles agent
+functions to CUDA at run time, stores agents as structures of arrays, and passes messages through
+spatial, array or bucket structures. It runs up to 200 million agents on a V100 and 1M agents in
+about 3\,ms per step. Its performance depends on spatial or keyed locality; agents competing for
+one resource need repeated bidding sub-models, atomics are non-deterministic, and one model is
+limited to one GPU.
+
+\textbf{Agents.jl}~\cite{datseris2024} (SIMULATION 2024, online 2022) is a Julia ABM library that
+runs single models about 2--125$\times$ faster than MASON, NetLogo and Mesa in the authors'
+benchmarks. It does not parallelise within a model, because agents mutate shared state, and has no
+GPU support: the same shared-state conflict that an order book creates.
+
+\subsection{Matching engines and hardware-accelerated trading}
+\textbf{CoinTossX}~\cite{jericevich2022} (SoftwareX 2022) is an open-source Java matching engine
+modelled on the Johannesburg Stock Exchange, with price--time priority and messaging over UDP. It
+reaches 106--248\,ns 90th-percentile matching latency on a 16-core server, but throughput falls from
+2{,}287 to 621--989 orders per second as client--stock pairs are added, and it is engineered for
+latency rather than for parallel scaling.
+
+\textbf{LightTrader}~\cite{yoo2023} (IEEE HPCA 2023) is a heterogeneous high-frequency trading system:
+an FPGA parses market data and keeps the top of a local order book, while custom deep-learning
+accelerators run price-prediction models, with a scheduler that picks batch size and voltage and
+frequency under a power budget. It is 13.9$\times$ faster than a V100-based system for AI
+processing, but scaling saturates as accelerators share the power budget. It accelerates the
+\emph{decision} stage for one trader, the analogue of our GPU phase.
+
+\subsection{Distributed ABM and reproducible parallel random numbers}
+\textbf{Repast4Py}~\cite{collier2022} (Winter Simulation Conference 2022) distributes Python ABMs
+with MPI, partitioning space across ranks with ghost regions. A 3.6M-agent random walk speeds up
+4.39$\times$ from 36 to 288 ranks (efficiency 0.94 to 0.55), while a network model reaches only
+1.75$\times$ (efficiency 0.22): communication dominates at higher rank counts. Whether results are
+identical across rank counts is not addressed.
+
+\textbf{SIMCoV-GPU}~\cite{leyba2024} (ACM HPDC 2024) ports a spatial infection ABM to multiple GPUs
+with CUDA and UPC++, reaching 11.9$\times$ over 512 CPU cores with 16 GPUs. The GPU wins only on
+large enough problems (at 64 GPUs on a small grid it is 0.85$\times$), and because CPU and GPU
+random number generators differ, results agree only statistically (within about 1\%), not bit for
+bit.
+
+\textbf{OpenRAND}~\cite{khan2024} (SoftwareX 2024) provides counter-based generators (Philox,
+Threefry and others) keyed by a logical entity rather than a thread, so streams give the same
+output on any thread count or device; it is 1.8$\times$ faster than cuRAND in a particle
+benchmark. It supplies reproducible random numbers but not reproducibility of a whole simulation,
+which also needs deterministic arithmetic and event ordering.
+
+\subsection{Summary, research gaps and motivation}
+Table~\ref{tab:lit} summarises the reviewed work. Four gaps motivate this project:
+\begin{enumerate}
+\item \textbf{Market simulators are built for fidelity, not parallel characterisation.}
+  ABIDES-Gym, PyMarketSim and CoinTossX run essentially serially; JAX-LOB parallelises only across
+  independent books. None splits the tick into a parallel decision phase and a serial matching
+  phase and relates the measured speedup to Amdahl's law.
+\item \textbf{The serial matching core is acknowledged but not measured.} No study reports what
+  share of tick time matching takes as agents grow, or the gap between kernel and end-to-end
+  speedup.
+\item \textbf{GPU and distributed ABM frameworks rely on locality.} FLAME GPU 2, Repast4Py and
+  SIMCoV-GPU exploit spatial neighbourhoods and halos; Agents.jl avoids in-model parallelism. An
+  order book, where every agent writes into one strictly ordered structure per instrument, fits
+  none of them.
+\item \textbf{Bit-identical heterogeneous results are rare.} SIMCoV-GPU accepts statistical
+  agreement and FLAME GPU 2 has non-deterministic atomics; OpenRAND makes only the random numbers
+  reproducible. No reviewed work shows a bit-identical event log across CUDA, OpenMP and MPI.
+\end{enumerate}
+We therefore build a simulator that partitions by instrument, keeps the GPU for decisions only,
+produces identical trades on every back end, and measures where its speedup stops and why.
+
+\begin{widetable}
+\centering
+\caption{Comparison of recent related work (2021--2024).}
+\label{tab:lit}
+\footnotesize
+\begin{tabularx}{\textwidth}{@{}p{2.3cm} X X X p{2.0cm}@{}}
+\toprule
+Work & Approach / platform & Advantages & Limitations & Key result\\
+\midrule
+ABIDES-Gym~\cite{amrouni2021} & discrete-event kernel, Python, serial & high fidelity, latency model, RL interface & single-threaded; no run times reported & --\\
+JAX-LOB~\cite{frey2023} & JAX on GPU, \texttt{vmap} over books & thousands of books in parallel; RL on GPU & serial within a book; fixed capacity & 2.6\,$\mu$s/msg per book; 7$\times$ RL\\
+PyMarketSim~\cite{mascioli2024} & Python discrete-time tick & simple, RL and game-theory tools & serial; one asset; 25 agents & 300k book ops/s\\
+FLAME GPU 2~\cite{richmond2023} & CUDA, SoA, spatial messages & 200M agents on one GPU & needs locality; non-det.\ atomics; 1 GPU per model & 1M agents in 3\,ms/step\\
+Agents.jl~\cite{datseris2024} & Julia, CPU & concise and fast single models & no in-model parallelism; no GPU & 2--125$\times$ vs other ABM tools\\
+CoinTossX~\cite{jericevich2022} & Java engine, UDP & sub-$\mu$s matching latency & throughput falls with instruments & 106--248\,ns latency\\
+LightTrader~\cite{yoo2023} & FPGA + DL accelerators & fast decision stage, energy-aware & power-limited scaling; one trader & 13.9$\times$ vs V100 system\\
+Repast4Py~\cite{collier2022} & Python + MPI, spatial partitions & HPC scale from Python & communication-bound at high rank counts & 4.39$\times$, 36$\to$288 ranks\\
+SIMCoV-GPU~\cite{leyba2024} & CUDA + UPC++, multi-GPU & 11.9$\times$ over 512 cores & GPU wins only at large sizes; not bitwise reproducible & 11.9$\times$ (16 GPUs)\\
+OpenRAND~\cite{khan2024} & counter-based RNG library & reproducible on any back end & RNG only, not whole simulation & 1.8$\times$ vs cuRAND\\
+\bottomrule
+\end{tabularx}
+\end{widetable}

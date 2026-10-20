@@ -1,0 +1,44 @@
+% Springer Nature (LNCS) conference template version of the report.
+% Same content as main-ieee.tex; references use IEEE style as the guidelines require.
+% Build: see README.md in this folder (pdflatex, bibtex, pdflatex, pdflatex).
+\documentclass[runningheads]{llncs}
+\input{preamble}
+\usepackage[hidelinks]{hyperref}
+% Single-column layout: wide floats are ordinary floats.
+\newenvironment{widefigure}{\begin{figure}[t]}{\end{figure}}
+\newenvironment{widetable}{\begin{table}[t]}{\end{table}}
+
+% Let floats sit near their text on the smaller LNCS page.
+\renewcommand{\topfraction}{0.95}
+\renewcommand{\bottomfraction}{0.6}
+\renewcommand{\textfraction}{0.05}
+\renewcommand{\floatpagefraction}{0.75}
+\setcounter{topnumber}{4}
+\setcounter{totalnumber}{6}
+\newlength{\covergap}\setlength{\covergap}{0.45cm}
+\newcommand{\coverlogo}{5.5cm}
+
+\begin{document}
+\input{content/cover}
+
+\title{Heterogeneous Parallelization of an Agent-Based Limit Order Book Simulator Using CUDA, OpenMP, and MPI}
+\titlerunning{Heterogeneous Parallel Limit Order Book Simulator}
+\author{Abhisaar Gupta \and Devesh Khaitan \and Sohan Kar \and Pratham Dobhal}
+\authorrunning{A. Gupta et al.}
+\institute{School of Computer Engineering, Manipal Institute of Technology,\\
+Manipal Academy of Higher Education, Manipal, India}
+
+\maketitle
+
+\begin{abstract}
+\input{content/abstract}
+\keywords{Limit order book \and Agent-based simulation \and Heterogeneous computing \and CUDA \and OpenMP \and MPI \and Amdahl's law \and Reproducibility}
+\end{abstract}
+
+\input{content/body1}
+\input{content/body2}
+\input{content/body3}
+
+\bibliographystyle{IEEEtran}
+\bibliography{refs}
+\end{document}

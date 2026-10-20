@@ -1,5 +1,8 @@
 build*/
-results/
+results/*
+!results/colab-t4/
+!results/laptop/
+!results/README.md
 *.nsys-rep
 *.ncu-rep
 __pycache__/

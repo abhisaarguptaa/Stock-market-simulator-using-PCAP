@@ -1,0 +1,349 @@
+% Sections 1-3 and 5-9 (Introduction ... Algorithms). Shared by both templates.
+
+\section{Introduction}
+A financial exchange is, at its core, a large concurrent system. Thousands of independent
+participants form intentions at the same time, but their orders must be serialised into a single,
+strictly ordered book per traded instrument before any trade can occur. Agent-based models (ABMs)
+of limit order book (LOB) markets reproduce this structure in software and are widely used to study
+price formation, liquidity, and the statistical regularities of returns~\cite{cont2001,preis2006}.
+Their main practical limitation is computational: fidelity improves with the number of simulated
+agents and instruments, yet mainstream market simulators execute as single-threaded discrete-event
+loops~\cite{byrd2020abides} and therefore scale poorly with either.
+
+This workload is interesting for a parallel computer architecture study because it is not
+uniformly parallel. The agent decision phase is massively data-parallel and maps naturally onto a
+GPU, since every agent independently reads a shared view of the book and emits at most one order.
+The matching phase is the opposite: price--time priority imposes a total order on events within an
+instrument, so matching for a single instrument resists parallelisation almost entirely and can
+only be distributed across instruments. The simulation therefore contains an irreducible serial
+core between two parallel regions, and the achievable speedup is governed by the interaction
+between them rather than by the efficiency of any single kernel.
+
+This project implements such a simulator with a three-tier heterogeneous mapping: agent decisions
+in CUDA, per-instrument matching parallelised across instruments with OpenMP, and instrument sets
+distributed across processes with MPI. We treat the resulting performance envelope as the object
+of study. The main contributions are:
+\begin{itemize}
+\item A deterministic LOB simulator whose serial, OpenMP, CUDA and MPI back ends produce
+  bit-identical trade logs for a given seed, verified by an order-sensitive hash of every trade.
+\item Measurements of the CPU--GPU boundary cost, the effect of warp divergence and copy-back
+  compaction, and the agent count at which heterogeneous execution overtakes a multicore baseline.
+\item A strong, weak and per-instrument scaling study with Amdahl, Gustafson, Karp--Flatt and
+  roofline analysis, showing that order matching is the bottleneck on every back end.
+\item An open-source implementation with one-command setup and demo scripts, so every result in
+  this report can be reproduced.
+\end{itemize}
+
+The rest of the report is organised as follows. Section~\ref{sec:lit} reviews related work,
+Sections~\ref{sec:problem} and~\ref{sec:obj} state the problem and objectives,
+Sections~\ref{sec:method}--\ref{sec:algo} describe the method, architecture and algorithms,
+Sections~\ref{sec:setup}--\ref{sec:perf} present the experiments, results and analysis,
+Section~\ref{sec:compare} compares the work with existing methods, and
+Sections~\ref{sec:concl}--\ref{sec:future} conclude.
+
+\input{content/litreview}
+
+\section{Problem Statement}\label{sec:problem}
+Given a population of $N$ heterogeneous trading agents and $M$ instruments, each with its own
+limit order book, simulate $T$ discrete ticks in which (i) every agent observes a snapshot of its
+instrument's book and may submit, cancel or modify one order, (ii) each instrument's orders are
+matched under price--time priority, and (iii) a market-wide index is published for the next tick.
+The problem is to map this pipeline onto heterogeneous hardware (a GPU, a multicore CPU and
+multiple processes) such that:
+\begin{enumerate}
+\item the parallel versions produce \emph{exactly} the same trades as a serial reference for the
+  same random seed, so that correctness can be checked and experiments repeated;
+\item the speedup over the serial reference is measured and explained, including the serial
+  fraction imposed by price--time priority, the cost of moving data across the CPU--GPU boundary,
+  and the cost of synchronising MPI ranks at every tick; and
+\item the agent and instrument counts at which the heterogeneous mapping beats an optimised
+  multicore CPU implementation are identified.
+\end{enumerate}
+The simulated market must also remain realistic, reproducing the standard stylised facts of
+financial returns~\cite{cont2001}.
+
+\section{Objectives}\label{sec:obj}
+The eight objectives from the project synopsis, and where each is addressed, are:
+\begin{enumerate}
+\item \textbf{Serial matching engine.} Implement a correct serial LOB engine supporting add,
+  cancel, modify and market orders under price--time priority, with a unit test suite as the
+  correctness reference (Sections~\ref{sec:method}, \ref{sec:algo}, \ref{sec:res-correct}).
+\item \textbf{Agents and serial baseline.} Implement noise, momentum, mean-reverting and
+  market-making agents and a fully serial simulator as the speedup baseline
+  (Section~\ref{sec:method}).
+\item \textbf{CUDA agent phase.} Port agent decisions to CUDA with agent-type sorting to reduce warp
+  divergence, coalesced access, and counter-based random streams for determinism
+  (Sections~\ref{sec:algo}, \ref{sec:res-gpu}).
+\item \textbf{OpenMP matching.} Parallelise matching across instruments and evaluate thread scaling,
+  false sharing and memory contention (Section~\ref{sec:res-cpu}).
+\item \textbf{MPI distribution.} Distribute instruments across ranks with a per-tick index reduction
+  and quantify communication overhead (Section~\ref{sec:res-cpu}).
+\item \textbf{Validation.} Compare trade logs exactly across back ends and check the stylised facts
+  (Sections~\ref{sec:res-correct}, \ref{sec:res-facts}).
+\item \textbf{Scaling study.} Strong and weak scaling, an Amdahl fit of the serial fraction,
+  roofline placement and Nsight metrics (Sections~\ref{sec:results}, \ref{sec:perf}).
+\item \textbf{CPU vs GPU threshold.} Identify where the heterogeneous mapping overtakes the
+  multicore CPU and explain why (Sections~\ref{sec:res-gpu}, \ref{sec:perf}).
+\end{enumerate}
+
+\section{Proposed Methodology}\label{sec:method}
+
+\subsection{Barrier-synchronised tick}
+The simulator advances in discrete ticks. Following the conservative synchronisation family of
+parallel discrete-event simulation~\cite{fujimoto1990}, every tick has three phases separated by
+barriers:
+\begin{enumerate}
+\item \textbf{Decide} (parallel over agents): each agent reads its instrument's snapshot (best bid,
+  best ask, last price, trend) and the market index, and emits at most one order intent.
+\item \textbf{Match} (parallel over instruments, serial inside each): the intents of each instrument
+  are applied to its book in a deterministic arrival order, producing trades.
+\item \textbf{Publish} (reduction over instruments): snapshots for the next tick are rebuilt and the
+  market index (the sum of mid prices) is reduced, across ranks with \texttt{MPI\_Allreduce}.
+\end{enumerate}
+This trades some concurrency for determinism and auditability; the cost of the barrier is one of
+the quantities measured.
+
+\subsection{Order book}
+Each instrument has a fixed grid of 4096 integer price levels with one FIFO queue per level. Orders
+live in a node pool and are doubly linked into their level, with an id-to-node hash map, so add,
+cancel and modify are $O(1)$ except for moving the best-price pointer when a level empties. Limit
+orders match against the opposite side at the resting (maker) price and the remainder rests;
+market orders match and drop any unfilled remainder. A modify keeps time priority only for a
+quantity decrease at the same price. Resting orders expire after a time-to-live (100 ticks by
+default), which keeps the book bounded.
+
+\subsection{Agent population}
+Four strategies, after the heterogeneous populations of~\cite{chiarella2002,preis2006}, are written
+once as \texttt{\_\_host\_\_ \_\_device\_\_} functions so that the CPU loops and the CUDA kernel run
+literally the same code (Table~\ref{tab:agents}). Agents are stateless functions of (agent id,
+tick, seed, snapshot): they do not track inventory, which keeps the GPU phase free of per-tick
+feedback from the matching engine.
+
+\begin{table}[t]
+\centering
+\caption{Agent population (default mix).}
+\label{tab:agents}
+\footnotesize
+\begin{tabularx}{\columnwidth}{@{}l c c X@{}}
+\toprule
+Strategy & Share & Acts/tick & Behaviour\\
+\midrule
+Noise & 65\% & 10\% & random side; mostly limit orders near the reference price\\
+Momentum & 15\% & 5\% & market order in the direction of the instrument and index trend\\
+Mean-reverting & 10\% & 3\% & limit order back toward the fundamental value\\
+Market maker & 10\% & 100\% & re-quotes one side per tick, cancels its quote from two ticks earlier\\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Determinism by design}
+Parallel stochastic simulations are usually not repeatable, because random draws and floating-point
+reductions depend on thread scheduling. We make every back end produce the identical trade log:
+\begin{itemize}
+\item \textbf{Counter-based RNG:} Philox4x32-10~\cite{salmon2011} maps (seed, stream, agent, tick)
+  to random numbers with no shared state, so thread order cannot change any draw.
+\item \textbf{Integer-only decisions:} CPU and GPU floating point can round differently (fused
+  multiply--add, math libraries), so decisions use integer arithmetic.
+\item \textbf{Deterministic arrival order:} intents are applied in agent-id order, rotated by a
+  random offset per (instrument, tick) so that no agent is always first.
+\item \textbf{Predictable order ids:} an order's id is $(\textit{tick}+1)\ll 32 \mid \textit{agent}$,
+  so a market maker on the GPU can cancel its earlier quote without feedback from the CPU.
+\item \textbf{Integer reductions:} the index is a sum of integers, so \texttt{MPI\_Allreduce} gives
+  the same result in any reduction order.
+\item \textbf{Order-independent compaction:} GPU output slots are reserved with
+  \texttt{atomicAdd}; each entry carries its agent index and the host scatters by index.
+\end{itemize}
+Correctness is checked with an order-sensitive FNV-1a hash over every trade (tick, price,
+quantity, buyer, seller, maker and taker ids), combined across instruments and ranks.
+
+\subsection{Parallel mapping}
+\begin{itemize}
+\item \textbf{CUDA (decide):} one thread per agent, structure-of-arrays layout for coalesced loads,
+  agents sorted by strategy so that warps mostly take one branch, snapshots read through the
+  read-only cache (\texttt{\_\_ldg}), parameters in constant memory, and compaction of the copy
+  back to only the agents that acted (about 20\% per tick).
+\item \textbf{OpenMP (decide and match):} \texttt{parallel for schedule(static)} over agents for decisions;
+  \texttt{parallel for schedule(dynamic,1)} over instruments for matching, with per-thread counters
+  padded to 64-byte cache lines to avoid false sharing.
+\item \textbf{MPI (instruments):} each rank owns a contiguous block of instruments and the agents
+  trading them; ranks meet once per tick in an integer \texttt{MPI\_Allreduce}.
+\end{itemize}
+
+\subsection{Measurement}
+The program times every phase of every tick (decide, host-to-device copy, kernel, device-to-host
+copy, match, publish, MPI communication) and reports totals; for MPI it reports the slowest rank.
+Kernel time uses CUDA events. Speedup is $S(p)=T_1/T_p$ against the serial back end, efficiency
+is $E(p)=S(p)/p$, the serial fraction $f$ is fitted to Amdahl's law
+$S(p)=1/(f+(1-f)/p)$~\cite{amdahl1967} by least squares, and the Karp--Flatt metric
+$e(p)=(1/S-1/p)/(1-1/p)$~\cite{karp1990} is reported for each $p$. Weak scaling is interpreted
+with Gustafson's law~\cite{gustafson1988} and the kernel is placed on a roofline~\cite{williams2009}
+from Nsight Compute counters.
+
+\section{System Architecture}\label{sec:arch}
+Fig.~\ref{fig:arch} shows how the three tiers map onto hardware and Fig.~\ref{fig:flow} shows the
+control flow of one simulation run. MPI splits the instruments into blocks, one per rank. Inside a
+rank, the decision phase runs on the GPU (or on all CPU cores with OpenMP), and the matching phase
+runs on the CPU with one instrument per OpenMP thread at a time. The ranks synchronise once per
+tick to reduce the market index. Table~\ref{tab:modules} lists the software modules.
+
+\begin{figure}[t]
+\centering
+\resizebox{\columnwidth}{!}{%
+\begin{tikzpicture}[
+  font=\sffamily\small,
+  box/.style={draw, rounded corners=2pt, align=center, minimum height=0.8cm, inner sep=3pt},
+  gpu/.style={box, fill=green!12},
+  cpu/.style={box, fill=blue!10},
+  net/.style={box, fill=orange!15},
+  arr/.style={-{Latex[length=2mm]}, thick}]
+  % Rank 0
+  \node[draw, dashed, rounded corners, minimum width=6.0cm, minimum height=5.0cm,
+        label={[font=\sffamily\bfseries\small]above:MPI rank 0 (instruments $0..M/2-1$)}] (r0) at (0,0) {};
+  \node[gpu, minimum width=5.4cm] (g0) at (0,1.5) {GPU: \textbf{decide} kernel\\one thread per agent, SoA, sorted};
+  \node[box, minimum width=5.4cm, fill=gray!10] (c0) at (0,0.2) {compaction (atomicAdd) $\rightarrow$ copy back\\host scatter by agent index};
+  \node[cpu, minimum width=5.4cm] (m0) at (0,-1.3) {CPU: \textbf{match} with OpenMP\\thread $k$ $\leftarrow$ instrument $i$ (dynamic)};
+  \draw[arr] (g0) -- (c0); \draw[arr] (c0) -- (m0);
+  % Rank 1
+  \node[draw, dashed, rounded corners, minimum width=6.0cm, minimum height=5.0cm,
+        label={[font=\sffamily\bfseries\small]above:MPI rank 1 (instruments $M/2..M-1$)}] (r1) at (6.8,0) {};
+  \node[gpu, minimum width=5.4cm] (g1) at (6.8,1.5) {GPU: \textbf{decide} kernel\\one thread per agent, SoA, sorted};
+  \node[box, minimum width=5.4cm, fill=gray!10] (c1) at (6.8,0.2) {compaction (atomicAdd) $\rightarrow$ copy back\\host scatter by agent index};
+  \node[cpu, minimum width=5.4cm] (m1) at (6.8,-1.3) {CPU: \textbf{match} with OpenMP\\thread $k$ $\leftarrow$ instrument $i$ (dynamic)};
+  \draw[arr] (g1) -- (c1); \draw[arr] (c1) -- (m1);
+  % Allreduce
+  \node[net, minimum width=12.6cm] (ar) at (3.4,-3.4) {\textbf{publish}: rebuild snapshots, \texttt{MPI\_Allreduce} of the integer index (barrier)};
+  \draw[arr] (m0) -- (m0|-ar.north); \draw[arr] (m1) -- (m1|-ar.north);
+  \draw[arr, dashed] (ar.west) -- ++(-0.6,0) |- node[pos=0.25, left, align=right]{next\\tick} (g0.west);
+  \draw[arr, dashed] (ar.east) -- ++(0.6,0) |- (g1.east);
+\end{tikzpicture}}
+\caption{System architecture: the three-tier heterogeneous mapping (two MPI ranks shown).}
+\label{fig:arch}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\resizebox{0.86\columnwidth}{!}{%
+\begin{tikzpicture}[
+  font=\sffamily\small, node distance=0.42cm,
+  st/.style={draw, rounded corners=8pt, fill=gray!15, minimum width=4.2cm, minimum height=0.7cm, align=center},
+  pr/.style={draw, fill=blue!8, minimum width=4.2cm, minimum height=0.7cm, align=center},
+  dc/.style={draw, diamond, aspect=2.4, fill=orange!15, align=center, inner sep=1pt},
+  arr/.style={-{Latex[length=2mm]}, thick}]
+  \node[st] (start) {Start: parse options (N, M, T, seed, back ends)};
+  \node[pr, below=of start] (init) {Create agents (sorted by type),\\books, Philox streams; split instruments over ranks};
+  \node[pr, below=of init] (snap) {Build snapshot of every book};
+  \node[pr, below=of snap, fill=green!12] (dec) {\textbf{Decide}: serial / OpenMP / CUDA\\each agent emits $\leq 1$ intent};
+  \node[pr, below=of dec] (arrv) {Order intents per instrument\\(rotated agent-id order)};
+  \node[pr, below=of arrv, fill=blue!12] (mat) {\textbf{Match}: one instrument per thread,\\price--time priority, hash trades, expire old orders};
+  \node[pr, below=of mat, fill=orange!12] (pub) {\textbf{Publish}: market index by\\\texttt{MPI\_Allreduce} (barrier)};
+  \node[dc, below=of pub] (more) {tick $< T$?};
+  \node[st, below=of more] (out) {Combine hashes over ranks; print\\trades, fingerprint and phase times};
+  \draw[arr] (start) -- (init); \draw[arr] (init) -- (snap); \draw[arr] (snap) -- (dec);
+  \draw[arr] (dec) -- (arrv); \draw[arr] (arrv) -- (mat); \draw[arr] (mat) -- (pub);
+  \draw[arr] (pub) -- (more); \draw[arr] (more) -- node[right]{no} (out);
+  \coordinate (R) at ($(mat.east)+(0.5,0)$);
+  \draw[arr] (more.east) -- node[above]{yes} (more.east -| R) |- (snap.east);
+\end{tikzpicture}}
+\caption{Flowchart of one simulation run.}
+\label{fig:flow}
+\end{figure}
+
+\begin{table}[t]
+\centering
+\caption{Software modules (C++17, CUDA, OpenMP, MPI).}
+\label{tab:modules}
+\footnotesize
+\begin{tabularx}{\columnwidth}{@{}l X@{}}
+\toprule
+File & Role\\
+\midrule
+\texttt{order\_book.hpp/.cpp} & serial matching engine, price--time priority\\
+\texttt{agents.hpp} & four strategies, shared by CPU and GPU\\
+\texttt{philox.hpp} & Philox4x32-10 counter-based RNG\\
+\texttt{sim.hpp/.cpp} & tick loop, OpenMP matching, MPI reduction, trade hash\\
+\texttt{decide\_cuda.cu} & CUDA decision kernel and compaction\\
+\texttt{main.cpp} & \texttt{lobsim} command-line program\\
+\texttt{test\_main.cpp} & unit tests (259{,}597 checks)\\
+\texttt{scripts/}, \texttt{analysis/} & setup, demo, benchmarks, profiling, plots\\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{Algorithms}\label{sec:algo}
+Algorithm~\ref{alg:tick} is the top-level tick loop executed by every MPI rank.
+Algorithm~\ref{alg:match} matches one incoming limit order under price--time priority; it is the
+serial core of the simulation. Algorithm~\ref{alg:kernel} is the CUDA decision kernel.
+
+\begin{algorithm}[t]
+\caption{Barrier-synchronised tick loop (per MPI rank)}
+\label{alg:tick}
+\footnotesize
+\begin{algorithmic}[1]
+\Require agents $A_r$ and instruments $I_r$ owned by rank $r$; ticks $T$; seed $s$
+\For{$t \gets 0$ \textbf{to} $T-1$}
+  \State $snap[i] \gets \textsc{Snapshot}(book[i])$ \textbf{for all} $i \in I_r$
+  \State \textit{// Phase 1: decide (CUDA kernel or OpenMP parallel for)}
+  \ForAll{$a \in A_r$ \textbf{in parallel}}
+    \State $intent[a] \gets \textsc{Decide}(a, t, s, snap[inst(a)], index)$
+  \EndFor
+  \State \textit{// Phase 2: match, one instrument per thread}
+  \ForAll{$i \in I_r$ \textbf{in parallel} (\texttt{schedule(dynamic,1)})}
+    \State $o \gets \textsc{Rotate}(\text{agents of } i, \textsc{Philox}(s,i,t))$
+    \ForAll{$a$ \textbf{in order} $o$ with $intent[a] \neq \emptyset$}
+      \State $trades \gets \textsc{Apply}(book[i], intent[a])$ \Comment{Alg.~\ref{alg:match}}
+      \State $h[i] \gets \textsc{FNV1a}(h[i], trades)$
+    \EndFor
+    \State \textsc{ExpireOrders}$(book[i], t)$
+  \EndFor
+  \State \textit{// Phase 3: publish}
+  \State $local \gets \sum_{i\in I_r} mid(book[i])$ \Comment{integer}
+  \State $index \gets \textsc{MPI\_Allreduce}(local, \textsc{Sum})$ \Comment{barrier}
+\EndFor
+\State \Return $\textsc{MPI\_Allreduce}(h, \textsc{BXor})$ \Comment{per-instrument hashes}
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[t]
+\caption{Match a limit buy order (price--time priority)}
+\label{alg:match}
+\footnotesize
+\begin{algorithmic}[1]
+\Require book with ask levels $L[p]$ (FIFO queues), best ask $p_a$; order $(id, p, q)$
+\While{$q > 0$ \textbf{and} $p_a \leq p$}
+  \State $m \gets \textsc{Front}(L[p_a])$ \Comment{oldest order at best price}
+  \State $x \gets \min(q, m.q)$
+  \State \textsc{EmitTrade}$(p_a, x, \text{maker}=m, \text{taker}=id)$
+  \State $q \gets q - x$; \ $m.q \gets m.q - x$
+  \If{$m.q = 0$}
+    \State remove $m$ from $L[p_a]$ and from the id map
+    \If{$L[p_a]$ is empty} \State $p_a \gets$ next non-empty ask level \EndIf
+  \EndIf
+\EndWhile
+\If{$q > 0$} \State append $(id, p, q)$ to the back of bid level $p$; update best bid \EndIf
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[t]
+\caption{CUDA decision kernel with compaction}
+\label{alg:kernel}
+\footnotesize
+\begin{algorithmic}[1]
+\Require SoA arrays $type[], inst[]$ (sorted by type); snapshots in global memory; params in constant memory
+\State $a \gets blockIdx.x \cdot blockDim.x + threadIdx.x$
+\If{$a \geq N$} \Return \EndIf
+\State $sn \gets \texttt{\_\_ldg}(\&snap[inst[a]])$ \Comment{read-only cache}
+\State $(r_0..r_3) \gets \textsc{Philox4x32}(s, a, t)$ \Comment{no shared RNG state}
+\State $o \gets \textsc{Decide}_{type[a]}(sn, index, r)$ \Comment{integer only; warps mostly uniform}
+\If{$o \neq \emptyset$}
+  \State $k \gets \texttt{atomicAdd}(\&count, 1)$
+  \State $out[k] \gets (a, o)$ \Comment{slot order varies; agent index makes it irrelevant}
+\EndIf
+\State \textit{// Host: copy back $out[0..count-1]$ only, then $intent[out[k].a] \gets out[k].o$}
+\end{algorithmic}
+\end{algorithm}
+
+\textbf{Complexity.} Decisions cost $O(N)$ work per tick with $O(N/p)$ depth on $p$ processors.
+Each order costs $O(1)$ to add or cancel plus $O(k)$ for $k$ fills; with $n_i$ orders on instrument
+$i$, matching costs $O(\sum_i n_i)$ work but its depth is $O(\max_i n_i)$, because the orders of
+one instrument are processed sequentially. With a single instrument the depth equals the work,
+which is the source of the serial fraction measured in Section~\ref{sec:perf}.
