@@ -17,7 +17,7 @@ Made with `notebooks/colab_run.ipynb`. Each configuration ran 3 times.
 | `profile/` | Nsight Compute and Nsight Systems summaries | divergence, occupancy, roofline |
 | `stylized_facts.json` | heavy tails, volatility clustering | model realism |
 
-## `laptop/`: 16-thread laptop, Windows 11 with WSL2 Ubuntu (2026-10-19)
+## `laptop/`: 16-thread laptop, Windows with WSL2 Ubuntu (2026-10-19)
 
 Made with `scripts/bench.sh`.
 
